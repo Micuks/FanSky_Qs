@@ -6,6 +6,8 @@ import {segment} from 'oicq'
 import getCfg from "../../models/getCfg.js";
 import * as url from "url";
 import fetch from 'node-fetch'
+// 引用 l-plugin 的 Markdown 渲染能力
+import renderMarkdownImage from '../../../l-plugin/utils/markdown/render.js'
 
 let Moudel1List = []
 let Moudel1Num = []
@@ -56,7 +58,15 @@ async function SendAIGroup(e, ResultMsg) {
         return ReturnMsg;
     }
 
-    const SendMsg = formatMsg(result);
+    // 若包含数学公式/Markdown 标记，则优先使用 l-plugin 的 Markdown 渲染为图片
+    if (shouldRenderMarkdown(result)) {
+        const img = await renderMarkdownImage(result, { saveId: `openai_${e.user_id || e.group_id || Date.now()}` })
+        if (img) {
+            await e.reply(img)
+            return
+        }
+    }
+    const SendMsg = formatMsg(result)
     await e.reply(SendMsg)
 }
 
@@ -393,6 +403,24 @@ async function SendResMsg(e, response, Json, GetResult) {
     let result = content
     let View = result.substring(0, 30)
     let SendResult, MsgList
+    // 若包含数学公式/Markdown 标记，则优先使用 l-plugin 的 Markdown 渲染为图片
+    if (shouldRenderMarkdown(result)) {
+        const img = await renderMarkdownImage(result, { saveId: `openai_${e.user_id || e.group_id || Date.now()}` })
+        if (img) {
+            await e.reply(img)
+            Moudel1List[e.user_id].messages.push({role: 'assistant', content: result})
+            await redis.del(`FanSky:OpenAI:Status:${e.user_id}`);
+            if (Moudel1Num[e.user_id] >= 10 && !e.isMaster) {
+                delete Moudel1List[e.user_id]
+                delete Moudel1Num[e.user_id]
+            }
+            if (Json.ModelMode === 1) {
+                delete Moudel1List[e.user_id]
+                delete Moudel1Num[e.user_id]
+            }
+            return false
+        }
+    }
     if (GetResult === '不限') {
         if (response.data.choices[0].message.content.length > Json.Text_img) {
             // MsgList = [`${result}`, `${NowTime}\n魔晶：${GetResult}\n重置：${10 - Moudel1Num[e.user_id]}\n${response.data.choices[0].message.content.length}字`]
@@ -474,6 +502,20 @@ export async function ResetGPT3TurboList(e) {
     } catch (err) {
         logger.info(err)
     }
+}
+
+// 判断文本是否包含需要 Markdown 渲染的标记（主要关注数学公式）
+function shouldRenderMarkdown(text) {
+    if (!text || typeof text !== 'string') return false
+    // 常见数学分隔符与环境：\( \)  \[ \]  $$ $$  $...$  \begin{...}...\end{...}
+    const patterns = [
+        /\\\(/,           // \(
+        /\\\[/,           // \[
+        /\$\$[\s\S]*?\$\$/, // $$ ... $$
+        /(^|\s)\$[^$\n]+\$/, // $ ... $
+        /\\begin\{[a-zA-Z*]+\}/ // \begin{equation}, align*
+    ]
+    return patterns.some(r => r.test(text))
 }
 
 
