@@ -6,8 +6,21 @@ import {segment} from 'oicq'
 import getCfg from "../../models/getCfg.js";
 import * as url from "url";
 import fetch from 'node-fetch'
-// 引用 l-plugin 的 Markdown 渲染能力
-import renderMarkdownImage from '../../../l-plugin/utils/markdown/render.js'
+// 可选引用 l-plugin 的 Markdown 渲染能力（动态导入，失败则回退为文本）
+let _renderMarkdownImage = null
+let _renderTried = false
+async function getMarkdownRenderer() {
+    if (_renderTried) return _renderMarkdownImage
+    _renderTried = true
+    try {
+        const mod = await import('../../../l-plugin/utils/markdown/render.js')
+        _renderMarkdownImage = mod.renderMarkdownImage || mod.default || null
+    } catch (err) {
+        _renderMarkdownImage = null
+        try { logger.debug?.('[FanSky_Qs] 未检测到 l-plugin 渲染工具，回退文本') } catch (e) {}
+    }
+    return _renderMarkdownImage
+}
 
 let Moudel1List = []
 let Moudel1Num = []
@@ -58,12 +71,19 @@ async function SendAIGroup(e, ResultMsg) {
         return ReturnMsg;
     }
 
-    // 若包含数学公式/Markdown 标记，则优先使用 l-plugin 的 Markdown 渲染为图片
+    // 若包含数学公式/Markdown 标记，则优先使用 l-plugin 的 Markdown 渲染为图片（可选依赖）
     if (shouldRenderMarkdown(result)) {
-        const img = await renderMarkdownImage(result, { saveId: `openai_${e.user_id || e.group_id || Date.now()}` })
-        if (img) {
-            await e.reply(img)
-            return
+        const renderer = await getMarkdownRenderer()
+        if (renderer) {
+            try {
+                const img = await renderer(result, { saveId: `openai_${e.user_id || e.group_id || Date.now()}` })
+                if (img) {
+                    await e.reply(img)
+                    return
+                }
+            } catch (err) {
+                // 渲染失败时回退为文本
+            }
         }
     }
     const SendMsg = formatMsg(result)
@@ -403,22 +423,29 @@ async function SendResMsg(e, response, Json, GetResult) {
     let result = content
     let View = result.substring(0, 30)
     let SendResult, MsgList
-    // 若包含数学公式/Markdown 标记，则优先使用 l-plugin 的 Markdown 渲染为图片
+    // 若包含数学公式/Markdown 标记，则优先使用 l-plugin 的 Markdown 渲染为图片（可选依赖，失败回退）
     if (shouldRenderMarkdown(result)) {
-        const img = await renderMarkdownImage(result, { saveId: `openai_${e.user_id || e.group_id || Date.now()}` })
-        if (img) {
-            await e.reply(img)
-            Moudel1List[e.user_id].messages.push({role: 'assistant', content: result})
-            await redis.del(`FanSky:OpenAI:Status:${e.user_id}`);
-            if (Moudel1Num[e.user_id] >= 10 && !e.isMaster) {
-                delete Moudel1List[e.user_id]
-                delete Moudel1Num[e.user_id]
+        const renderer = await getMarkdownRenderer()
+        if (renderer) {
+            try {
+                const img = await renderer(result, { saveId: `openai_${e.user_id || e.group_id || Date.now()}` })
+                if (img) {
+                    await e.reply(img)
+                    Moudel1List[e.user_id].messages.push({role: 'assistant', content: result})
+                    await redis.del(`FanSky:OpenAI:Status:${e.user_id}`);
+                    if (Moudel1Num[e.user_id] >= 10 && !e.isMaster) {
+                        delete Moudel1List[e.user_id]
+                        delete Moudel1Num[e.user_id]
+                    }
+                    if (Json.ModelMode === 1) {
+                        delete Moudel1List[e.user_id]
+                        delete Moudel1Num[e.user_id]
+                    }
+                    return false
+                }
+            } catch (err) {
+                // 渲染失败时回退为原消息逻辑
             }
-            if (Json.ModelMode === 1) {
-                delete Moudel1List[e.user_id]
-                delete Moudel1Num[e.user_id]
-            }
-            return false
         }
     }
     if (GetResult === '不限') {
